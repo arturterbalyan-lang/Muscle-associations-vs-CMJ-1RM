@@ -1,1 +1,296 @@
 
+# ---- 1. Packages ------------------------------------------------------------
+
+library(MASS)        # stepAIC for stepwise regression
+
+
+# ---- 2. Data Import ---------------------------------------------------------
+
+data <- read.csv("data.csv", stringsAsFactors = FALSE)
+
+# Variable key:
+#   Tc       - TMG contraction time (ms)
+#   Td       - TMG delay time (ms)
+#   Tr       - TMG half-relaxation time (ms)
+#   Ts       - TMG sustained time (ms)
+#   Dm       - TMG maximal radial displacement (mm)
+#   X1RM     - half-squat one-repetition maximum (kg)
+#   CMJ      - countermovement jump height (cm)
+#   MVC_pct  - VL EMG amplitude normalized to MVC (%)
+#   PA       - pennation angle (deg)
+#   MT       - muscle thickness (cm)
+
+vars <- c("CMJ", "X1RM", "Tc", "Td", "Tr", "Ts", "Dm", "MVC_pct", "MT", "PA")
+
+cat("Data loaded:", nrow(data), "participants,", ncol(data), "variables\n\n")
+
+
+# ---- 3. Descriptive Statistics -----------------------------------------------
+
+cat("====================================================================\n")
+cat("  DESCRIPTIVE STATISTICS\n")
+cat("====================================================================\n\n")
+
+desc <- data.frame(
+  Variable = vars,
+  n        = sapply(vars, function(v) sum(!is.na(data[[v]]))),
+  Mean     = sapply(vars, function(v) mean(data[[v]], na.rm = TRUE)),
+  SD       = sapply(vars, function(v) sd(data[[v]], na.rm = TRUE)),
+  CI_lower = sapply(vars, function(v) {
+    x <- data[[v]][!is.na(data[[v]])]
+    mean(x) - qt(0.975, length(x) - 1) * sd(x) / sqrt(length(x))
+  }),
+  CI_upper = sapply(vars, function(v) {
+    x <- data[[v]][!is.na(data[[v]])]
+    mean(x) + qt(0.975, length(x) - 1) * sd(x) / sqrt(length(x))
+  }),
+  row.names = NULL
+)
+
+desc[, 3:6] <- round(desc[, 3:6], 3)
+print(desc)
+cat("\n")
+
+
+# ---- 4. Normality Assessment (Shapiro-Wilk) ---------------------------------
+
+cat("====================================================================\n")
+cat("  NORMALITY TESTING (Shapiro-Wilk)\n")
+cat("====================================================================\n\n")
+
+normality <- data.frame(
+  Variable = vars,
+  W        = sapply(vars, function(v) shapiro.test(data[[v]])$statistic),
+  p        = sapply(vars, function(v) shapiro.test(data[[v]])$p.value),
+  row.names = NULL
+)
+normality$Normal <- ifelse(normality$p > 0.05, "Yes", "No")
+normality$W <- round(normality$W, 4)
+normality$p <- round(normality$p, 4)
+
+print(normality)
+cat("\n")
+
+
+# ---- 5. Bivariate Correlations with 95% CIs ---------------------------------
+
+cat("====================================================================\n")
+cat("  BIVARIATE CORRELATIONS (Pearson's r)\n")
+cat("====================================================================\n\n")
+
+# Function: compute Pearson correlation with 95% CI
+compute_cor <- function(x_vals, y_vals, x_name, y_name) {
+  test <- cor.test(x_vals, y_vals, method = "pearson")
+  
+  data.frame(x = x_name, y = y_name,
+             r      = as.numeric(test$estimate),
+             ci_lo  = test$conf.int[1],
+             ci_hi  = test$conf.int[2],
+             p      = test$p.value,
+             stringsAsFactors = FALSE)
+}
+
+# Define domain blocks for blockwise FDR correction
+usg_vars <- c("MT", "PA")
+tmg_vars <- c("Tc", "Td", "Tr", "Ts", "Dm")
+emg_vars <- c("MVC_pct")
+nr_vars  <- c("CMJ", "X1RM")
+
+block_pairs <- list(
+  USG_vs_TMG = list(x = usg_vars, y = tmg_vars),
+  USG_vs_NR  = list(x = usg_vars, y = nr_vars),
+  USG_vs_EMG = list(x = usg_vars, y = emg_vars),
+  TMG_vs_NR  = list(x = tmg_vars, y = nr_vars),
+  TMG_vs_EMG = list(x = tmg_vars, y = emg_vars),
+  NR_vs_EMG  = list(x = nr_vars,  y = emg_vars)
+)
+
+# Compute all correlations by block
+all_corrs <- do.call(rbind, lapply(names(block_pairs), function(block_name) {
+  bp <- block_pairs[[block_name]]
+  pairs <- expand.grid(x = bp$x, y = bp$y, stringsAsFactors = FALSE)
+  pairs <- pairs[pairs$x != pairs$y, ]
+  
+  block_results <- do.call(rbind, lapply(seq_len(nrow(pairs)), function(i) {
+    compute_cor(data[[pairs$x[i]]], data[[pairs$y[i]]],
+                pairs$x[i], pairs$y[i])
+  }))
+  
+  block_results$block <- block_name
+  block_results
+}))
+
+
+# ---- 6. FDR Correction (Benjamini-Hochberg) Within Each Block ----------------
+
+all_corrs$p_fdr <- NA_real_
+for (b in unique(all_corrs$block)) {
+  idx <- all_corrs$block == b
+  all_corrs$p_fdr[idx] <- p.adjust(all_corrs$p[idx], method = "BH")
+}
+
+# Hopkins et al. (2009) magnitude interpretation
+interpret_r <- function(r) {
+  abs_r <- abs(r)
+  ifelse(abs_r < 0.1, "trivial",
+  ifelse(abs_r < 0.3, "small",
+  ifelse(abs_r < 0.5, "moderate",
+  ifelse(abs_r < 0.7, "large",
+  ifelse(abs_r < 0.9, "very large",
+                       "extremely large")))))
+}
+
+all_corrs$magnitude <- interpret_r(all_corrs$r)
+
+# Round for display
+all_corrs$r     <- round(all_corrs$r, 3)
+all_corrs$ci_lo <- round(all_corrs$ci_lo, 3)
+all_corrs$ci_hi <- round(all_corrs$ci_hi, 3)
+all_corrs$p     <- round(all_corrs$p, 4)
+all_corrs$p_fdr <- round(all_corrs$p_fdr, 4)
+
+print(all_corrs, row.names = FALSE)
+
+cat("\n--- Significant after FDR correction (pFDR < 0.05) ---\n")
+sig <- all_corrs[all_corrs$p_fdr < 0.05, ]
+if (nrow(sig) > 0) print(sig, row.names = FALSE) else cat("None\n")
+
+cat("\n--- Significant at unadjusted p < 0.05 ---\n")
+sig_raw <- all_corrs[all_corrs$p < 0.05, ]
+if (nrow(sig_raw) > 0) print(sig_raw, row.names = FALSE) else cat("None\n")
+cat("\n")
+
+
+# ---- 7. Stepwise Multiple Linear Regression: CMJ ----------------------------
+
+cat("====================================================================\n")
+cat("  STEPWISE REGRESSION - CMJ\n")
+cat("====================================================================\n\n")
+
+# Candidate predictors: variables with significant bivariate correlation (p < 0.05)
+# Check both directions (x->y and y->x) since block structure assigns roles
+sig_cmj_vars <- unique(c(
+  all_corrs$x[all_corrs$y == "CMJ" & all_corrs$p < 0.05],
+  all_corrs$y[all_corrs$x == "CMJ" & all_corrs$p < 0.05]
+))
+sig_cmj_vars <- setdiff(sig_cmj_vars, c("CMJ", "X1RM"))
+cat("Candidate predictors for CMJ:", paste(sig_cmj_vars, collapse = ", "), "\n\n")
+
+if (length(sig_cmj_vars) >= 1) {
+  formula_cmj <- as.formula(paste("CMJ ~", paste(sig_cmj_vars, collapse = " + ")))
+  model_cmj_full <- lm(formula_cmj, data = data)
+  model_cmj <- stepAIC(model_cmj_full, direction = "both", k = log(nrow(data)), trace = FALSE)
+  
+  cat("--- Final CMJ Model ---\n")
+  print(summary(model_cmj))
+  
+  cat("\n--- CMJ Model Diagnostics ---\n")
+  
+  sw <- shapiro.test(residuals(model_cmj))
+  cat(sprintf("Shapiro-Wilk on residuals: W = %.4f, p = %.4f\n", sw$statistic, sw$p.value))
+  
+  n_pred <- length(coef(model_cmj)) - 1
+  if (n_pred > 1) {
+    pred_names <- names(coef(model_cmj))[-1]
+    vif_vals <- sapply(pred_names, function(p) {
+      others <- setdiff(pred_names, p)
+      if (length(others) == 0) return(1)
+      f <- as.formula(paste(p, "~", paste(others, collapse = " + ")))
+      r2 <- summary(lm(f, data = data))$r.squared
+      1 / (1 - r2)
+    })
+    cat("\nVariance Inflation Factors:\n")
+    print(round(vif_vals, 3))
+  } else {
+    cat("\nSingle predictor - VIF not applicable.\n")
+  }
+  
+  r2_cmj  <- summary(model_cmj)$r.squared
+  adj_r2  <- summary(model_cmj)$adj.r.squared
+  f2_cmj  <- r2_cmj / (1 - r2_cmj)
+  f2_label <- ifelse(f2_cmj >= 0.35, "large",
+              ifelse(f2_cmj >= 0.15, "moderate",
+              ifelse(f2_cmj >= 0.02, "small", "negligible")))
+  
+  cat(sprintf("\nR-squared = %.3f, Adjusted R-squared = %.3f\n", r2_cmj, adj_r2))
+  cat(sprintf("Cohen's f-squared = %.3f (%s)\n\n", f2_cmj, f2_label))
+  
+} else {
+  cat("No significant predictors found for CMJ.\n\n")
+}
+
+
+# ---- 8. Stepwise Multiple Linear Regression: 1RM ----------------------------
+
+cat("====================================================================\n")
+cat("  STEPWISE REGRESSION - 1RM\n")
+cat("====================================================================\n\n")
+
+sig_1rm_vars <- unique(c(
+  all_corrs$x[all_corrs$y == "X1RM" & all_corrs$p < 0.05],
+  all_corrs$y[all_corrs$x == "X1RM" & all_corrs$p < 0.05]
+))
+sig_1rm_vars <- setdiff(sig_1rm_vars, c("CMJ", "X1RM"))
+cat("Candidate predictors for 1RM:", paste(sig_1rm_vars, collapse = ", "), "\n\n")
+
+if (length(sig_1rm_vars) >= 1) {
+  formula_1rm <- as.formula(paste("X1RM ~", paste(sig_1rm_vars, collapse = " + ")))
+  model_1rm_full <- lm(formula_1rm, data = data)
+  model_1rm <- stepAIC(model_1rm_full, direction = "both", k = log(nrow(data)), trace = FALSE)
+  
+  cat("--- Final 1RM Model ---\n")
+  print(summary(model_1rm))
+  
+  cat("\n--- 1RM Model Diagnostics ---\n")
+  
+  sw <- shapiro.test(residuals(model_1rm))
+  cat(sprintf("Shapiro-Wilk on residuals: W = %.4f, p = %.4f\n", sw$statistic, sw$p.value))
+  
+  n_pred <- length(coef(model_1rm)) - 1
+  if (n_pred > 1) {
+    pred_names <- names(coef(model_1rm))[-1]
+    vif_vals <- sapply(pred_names, function(p) {
+      others <- setdiff(pred_names, p)
+      if (length(others) == 0) return(1)
+      f <- as.formula(paste(p, "~", paste(others, collapse = " + ")))
+      r2 <- summary(lm(f, data = data))$r.squared
+      1 / (1 - r2)
+    })
+    cat("\nVariance Inflation Factors:\n")
+    print(round(vif_vals, 3))
+  } else {
+    cat("\nSingle predictor - VIF not applicable.\n")
+  }
+  
+  r2_1rm  <- summary(model_1rm)$r.squared
+  adj_r2  <- summary(model_1rm)$adj.r.squared
+  f2_1rm  <- r2_1rm / (1 - r2_1rm)
+  f2_label <- ifelse(f2_1rm >= 0.35, "large",
+              ifelse(f2_1rm >= 0.15, "moderate",
+              ifelse(f2_1rm >= 0.02, "small", "negligible")))
+  
+  cat(sprintf("\nR-squared = %.3f, Adjusted R-squared = %.3f\n", r2_1rm, adj_r2))
+  cat(sprintf("Cohen's f-squared = %.3f (%s)\n\n", f2_1rm, f2_label))
+  
+} else {
+  cat("No significant predictors found for 1RM.\n\n")
+}
+
+
+# ---- 9. Residual-vs-Fitted Plots --------------------------------------------
+
+if (exists("model_cmj") & exists("model_1rm")) {
+  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+  
+  plot(fitted(model_cmj), residuals(model_cmj),
+       xlab = "Fitted values", ylab = "Residuals",
+       main = "CMJ: Residuals vs Fitted", pch = 16, col = "grey30")
+  abline(h = 0, lty = 2, col = "red")
+  
+  plot(fitted(model_1rm), residuals(model_1rm),
+       xlab = "Fitted values", ylab = "Residuals",
+       main = "1RM: Residuals vs Fitted", pch = 16, col = "grey30")
+  abline(h = 0, lty = 2, col = "red")
+  
+  par(mfrow = c(1, 1))
+}
